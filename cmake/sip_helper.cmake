@@ -163,7 +163,7 @@ function(build_sip_binding PROJECT_NAME SIP_FILE)
     )
 
     # Build the cPython extension natively using CMake
-    python3_add_library(lib${PROJECT_NAME} MODULE ${GENERATED_CPP})
+    python3_add_library(lib${PROJECT_NAME} MODULE WITH_SOABI ${GENERATED_CPP})
 
     # Link project dependencies against this target
     target_include_directories(lib${PROJECT_NAME} PRIVATE ${${PROJECT_NAME}_INCLUDE_DIRS} ${SIP_BUILD_DIR})
