@@ -39,26 +39,40 @@ function(__find_qt_sip_files python_qt_binding_QT_MAJOR_VERSION)
     endif()
 endfunction()
 
-# Extract the sip-abi-version from PyQt's configuration
-#
-# :param BINDINGS_DIR: Path to the directory containing QT*.sip files.
-# :out __QT_SIP_ABI_VERSION: The detected ABI version (defaults to 12).
-function(__find_qt_sip_abi BINDINGS_DIR)
-    # Default to 12 if detection fails
-    set(DETECTED_ABI "12")
-    set(TOML_FILE "${BINDINGS_DIR}/QtCore/QtCore.toml")
-
-    if(EXISTS "${TOML_FILE}")
-        file(READ "${TOML_FILE}" TOML_CONTENT_STR)
-        if(TOML_CONTENT_STR MATCHES "sip-abi-version[ \t]*=[ \t]*\"([^\"]+)\"")
-            set(DETECTED_ABI ${CMAKE_MATCH_1})
-            message(STATUS "Detected SIP ABI version: ${DETECTED_ABI}")
-        endif()
-    else()
-        message(STATUS "QtCore.toml not found at ${TOML_FILE}, defaulting SIP ABI to 12")
+# Select the ABI required by the binding definitions and verify that the
+# active Python interpreter can load the corresponding SIP runtime.
+function(__find_qt_sip_abi BINDINGS_DIR QT_MAJOR_VERSION)
+    set(PYQT_MODULE_NAME "PyQt${QT_MAJOR_VERSION}")
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -c
+            "from ${PYQT_MODULE_NAME} import sip; v = sip.SIP_ABI_VERSION; print(f'{v >> 16}.{(v >> 8) & 255}')"
+        OUTPUT_VARIABLE RUNTIME_ABI
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_VARIABLE RUNTIME_ERROR
+        RESULT_VARIABLE RUNTIME_RESULT
+    )
+    if(NOT RUNTIME_RESULT STREQUAL "0" OR NOT RUNTIME_ABI MATCHES "^[0-9]+[.][0-9]+$")
+        message(FATAL_ERROR "Could not determine the SIP ABI of ${PYQT_MODULE_NAME}.sip: ${RUNTIME_ERROR}")
     endif()
 
-    set(__QT_SIP_ABI_VERSION "${DETECTED_ABI}" PARENT_SCOPE)
+    set(TOML_FILE "${BINDINGS_DIR}/QtCore/QtCore.toml")
+    set(REQUIRED_ABI "${RUNTIME_ABI}")
+    if(EXISTS "${TOML_FILE}")
+        file(STRINGS "${TOML_FILE}" ABI_LINE REGEX "^[ \t]*sip-abi-version[ \t]*=" LIMIT_COUNT 1)
+        if(NOT ABI_LINE MATCHES "sip-abi-version[ \t]*=[ \t]*\"([0-9]+[.][0-9]+)\"")
+            message(FATAL_ERROR "Missing or invalid SIP ABI in ${TOML_FILE}")
+        endif()
+        set(REQUIRED_ABI "${CMAKE_MATCH_1}")
+    endif()
+
+    string(REGEX REPLACE "[.].*$" "" RUNTIME_MAJOR "${RUNTIME_ABI}")
+    string(REGEX REPLACE "[.].*$" "" REQUIRED_MAJOR "${REQUIRED_ABI}")
+    if(NOT RUNTIME_MAJOR STREQUAL REQUIRED_MAJOR OR RUNTIME_ABI VERSION_LESS REQUIRED_ABI)
+        message(FATAL_ERROR
+            "${PYQT_MODULE_NAME} bindings need SIP ABI ${REQUIRED_ABI}, but the runtime exposes ${RUNTIME_ABI}")
+    endif()
+    message(STATUS "Detected SIP ABI version: ${REQUIRED_ABI} (runtime ${RUNTIME_ABI})")
+    set(__QT_SIP_ABI_VERSION "${REQUIRED_ABI}" PARENT_SCOPE)
 endfunction()
 
 # Check if modern sipbuild is available via python module
@@ -82,7 +96,7 @@ if(NOT __PYQT_BINDINGS_FOUND)
 endif()
 
 # Extract the sip-abi-version from PyQt
-__find_qt_sip_abi("${__PYQT_BINDINGS_DIR}")
+__find_qt_sip_abi("${__PYQT_BINDINGS_DIR}" "${python_qt_binding_QT_MAJOR_VERSION}")
 
 # Find qmake
 find_program(python_qt_binding_QMAKE_EXECUTABLE
@@ -164,6 +178,9 @@ function(build_sip_binding PROJECT_NAME SIP_FILE)
 
     # Build the cPython extension natively using CMake
     python3_add_library(lib${PROJECT_NAME} MODULE WITH_SOABI ${GENERATED_CPP})
+    if(__QT_SIP_ABI_VERSION VERSION_GREATER_EQUAL "14")
+        target_compile_features(lib${PROJECT_NAME} PRIVATE cxx_std_20)
+    endif()
 
     # Link project dependencies against this target
     target_include_directories(lib${PROJECT_NAME} PRIVATE ${${PROJECT_NAME}_INCLUDE_DIRS} ${SIP_BUILD_DIR})
